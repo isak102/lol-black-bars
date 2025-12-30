@@ -1,16 +1,18 @@
 """
-League of Legends Black Bars Script
+League of Legends Black Bars Script (Event-Driven Version)
 
 Creates a black background behind the League of Legends game window when it's focused,
 and hides the Windows taskbar. Restores everything when League loses focus or is minimized.
+
+Uses Windows Event Hooks (SetWinEventHook) for efficient event-driven detection instead of polling.
 """
 
 from __future__ import annotations
 
 import ctypes
+import ctypes.wintypes
 import signal
 import sys
-import time
 from typing import Any
 
 import win32api
@@ -19,13 +21,20 @@ import win32gui
 
 # Constants
 LEAGUE_WINDOW_TITLE = "League of Legends (TM) Client"
-POLL_INTERVAL_MS = 100
 TASKBAR_CLASS = "Shell_TrayWnd"
 START_BUTTON_CLASS = "Button"
 
+# Windows Event Constants
+EVENT_SYSTEM_FOREGROUND = 0x0003  # Foreground window changed
+EVENT_OBJECT_REORDER = 0x8004  # Z-order changed
+EVENT_SYSTEM_MINIMIZESTART = 0x0016  # Window minimized
+EVENT_SYSTEM_MINIMIZEEND = 0x0017  # Window restored from minimized
+WINEVENT_OUTOFCONTEXT = 0x0000  # Events delivered async, no hook injection
+
 # Global state
-black_window_hwnd = None
-black_bars_active = False
+black_window_hwnd: int | None = None
+black_bars_active: bool = False
+hook_handles: list[int] = []
 
 
 # =============================================================================
@@ -57,11 +66,6 @@ def is_window_minimized(hwnd: int) -> bool:
 def is_league_game_window(hwnd: int) -> bool:
     """Check if the given window handle is the League of Legends game window."""
     return get_window_title(hwnd) == LEAGUE_WINDOW_TITLE
-
-
-def find_league_window() -> int | None:
-    """Find the League of Legends game window handle."""
-    return win32gui.FindWindow(None, LEAGUE_WINDOW_TITLE) or None
 
 
 # =============================================================================
@@ -251,7 +255,7 @@ def show_taskbar() -> None:
 
 
 # =============================================================================
-# Main Logic
+# Black Bars State Management
 # =============================================================================
 
 
@@ -287,11 +291,149 @@ def deactivate_black_bars() -> None:
     print("Black bars deactivated")
 
 
-def cleanup() -> None:
-    """Clean up resources and restore system state."""
+def ensure_black_window_z_order(league_hwnd: int) -> None:
+    """Ensure the black window is positioned directly below the League window in z-order."""
     global black_window_hwnd
 
+    if black_window_hwnd is None:
+        return
+
+    try:
+        # Get the window directly below League in z-order
+        window_below_league = win32gui.GetWindow(league_hwnd, win32con.GW_HWNDNEXT)
+
+        # If our black window is not directly below League, reposition it
+        if window_below_league != black_window_hwnd:
+            win32gui.SetWindowPos(
+                black_window_hwnd,
+                league_hwnd,  # Insert after (below) League window
+                0,
+                0,
+                0,
+                0,
+                win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_NOACTIVATE,
+            )
+    except Exception:
+        pass
+
+
+def check_and_update_state() -> None:
+    """Check the current foreground window and update black bars state accordingly."""
+    foreground_hwnd = get_foreground_window()
+
+    if is_league_game_window(foreground_hwnd) and not is_window_minimized(
+        foreground_hwnd
+    ):
+        if not black_bars_active:
+            activate_black_bars(foreground_hwnd)
+        else:
+            # Black bars already active - ensure z-order is correct
+            ensure_black_window_z_order(foreground_hwnd)
+    else:
+        if black_bars_active:
+            deactivate_black_bars()
+
+
+# =============================================================================
+# Windows Event Hook
+# =============================================================================
+
+# Define the callback type for SetWinEventHook
+# WINEVENTPROC: void callback(HWINEVENTHOOK, DWORD, HWND, LONG, LONG, DWORD, DWORD)
+WinEventProcType = ctypes.WINFUNCTYPE(  # type: ignore[attr-defined]
+    None,
+    ctypes.wintypes.HANDLE,  # hWinEventHook
+    ctypes.wintypes.DWORD,  # event
+    ctypes.wintypes.HWND,  # hwnd
+    ctypes.wintypes.LONG,  # idObject
+    ctypes.wintypes.LONG,  # idChild
+    ctypes.wintypes.DWORD,  # idEventThread
+    ctypes.wintypes.DWORD,  # dwmsEventTime
+)
+
+
+def win_event_callback(
+    hWinEventHook: int,
+    event: int,
+    hwnd: int,
+    idObject: int,
+    idChild: int,
+    idEventThread: int,
+    dwmsEventTime: int,
+) -> None:
+    """Callback function for Windows events.
+
+    Called when foreground window changes or a window is minimized/restored.
+    """
+    # We handle all relevant events by checking the current state
+    # This is simpler and more robust than trying to track specific window events
+    check_and_update_state()
+
+
+# Keep a reference to prevent garbage collection
+_win_event_callback = WinEventProcType(win_event_callback)
+
+
+def install_event_hooks() -> list[int]:
+    """Install Windows event hooks for foreground changes, minimize events, and z-order changes.
+
+    Returns a list of hook handles (empty if all failed).
+    """
+    user32 = ctypes.windll.user32  # type: ignore[attr-defined]
+    hooks = []
+
+    # Hook 1: Foreground and minimize events (0x0003 to 0x0017)
+    hook1 = user32.SetWinEventHook(
+        EVENT_SYSTEM_FOREGROUND,  # eventMin
+        EVENT_SYSTEM_MINIMIZEEND,  # eventMax
+        0,  # hmodWinEventProc (0 for out-of-context)
+        _win_event_callback,  # lpfnWinEventProc
+        0,  # idProcess (0 = all processes)
+        0,  # idThread (0 = all threads)
+        WINEVENT_OUTOFCONTEXT,  # dwFlags
+    )
+    if hook1 != 0:
+        hooks.append(hook1)
+
+    # Hook 2: Z-order reorder events (0x8004)
+    # This fires when windows are reordered in the z-order
+    hook2 = user32.SetWinEventHook(
+        EVENT_OBJECT_REORDER,  # eventMin
+        EVENT_OBJECT_REORDER,  # eventMax
+        0,  # hmodWinEventProc (0 for out-of-context)
+        _win_event_callback,  # lpfnWinEventProc
+        0,  # idProcess (0 = all processes)
+        0,  # idThread (0 = all threads)
+        WINEVENT_OUTOFCONTEXT,  # dwFlags
+    )
+    if hook2 != 0:
+        hooks.append(hook2)
+
+    return hooks
+
+
+def uninstall_event_hooks(hooks: list[int]) -> None:
+    """Uninstall all Windows event hooks."""
+    user32 = ctypes.windll.user32  # type: ignore[attr-defined]
+    for hook in hooks:
+        user32.UnhookWinEvent(hook)
+
+
+# =============================================================================
+# Main Logic
+# =============================================================================
+
+
+def cleanup() -> None:
+    """Clean up resources and restore system state."""
+    global black_window_hwnd, hook_handles
+
     print("\nCleaning up...")
+
+    # Uninstall the event hooks
+    if hook_handles:
+        uninstall_event_hooks(hook_handles)
+        hook_handles = []
 
     # Always restore the taskbar
     show_taskbar()
@@ -304,7 +446,7 @@ def cleanup() -> None:
     print("Cleanup complete")
 
 
-def signal_handler(signum, frame) -> None:
+def signal_handler(signum: int, frame: Any) -> None:
     """Handle termination signals gracefully."""
     cleanup()
     sys.exit(0)
@@ -312,34 +454,52 @@ def signal_handler(signum, frame) -> None:
 
 def main() -> None:
     """Main entry point."""
-    global black_bars_active
+    global hook_handles
 
     # Set up signal handlers for graceful shutdown
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
-    print("League of Legends Black Bars Script")
-    print("=" * 40)
+    print("League of Legends Black Bars Script (Event-Driven)")
+    print("=" * 50)
     print(f"Monitoring for window: '{LEAGUE_WINDOW_TITLE}'")
-    print(f"Poll interval: {POLL_INTERVAL_MS}ms")
+    print("Using Windows Event Hooks (no polling)")
     print("Press Ctrl+C to exit")
-    print("=" * 40)
+    print("=" * 50)
 
     try:
+        # Install the Windows event hooks
+        hook_handles = install_event_hooks()
+        if not hook_handles:
+            print("Error: Failed to install Windows event hooks")
+            sys.exit(1)
+
+        print(f"Event hooks installed successfully ({len(hook_handles)} hooks)")
+
+        # Check initial state (in case League is already focused)
+        check_and_update_state()
+
+        # Run the Windows message loop to receive events
+        # This is required for the event hook to work
+        user32 = ctypes.windll.user32  # type: ignore[attr-defined]
+        msg = ctypes.wintypes.MSG()
+
         while True:
-            foreground_hwnd = get_foreground_window()
+            # GetMessage blocks until a message is available
+            # Returns 0 for WM_QUIT, -1 for error, positive for other messages
+            result = user32.GetMessageW(ctypes.byref(msg), 0, 0, 0)
 
-            # Check if League is the focused window and not minimized
-            if is_league_game_window(foreground_hwnd) and not is_window_minimized(
-                foreground_hwnd
-            ):
-                if not black_bars_active:
-                    activate_black_bars(foreground_hwnd)
+            if result == 0:
+                # WM_QUIT received
+                break
+            elif result == -1:
+                # Error occurred
+                print("Error in message loop")
+                break
             else:
-                if black_bars_active:
-                    deactivate_black_bars()
-
-            time.sleep(POLL_INTERVAL_MS / 1000)
+                # Dispatch the message
+                user32.TranslateMessage(ctypes.byref(msg))
+                user32.DispatchMessageW(ctypes.byref(msg))
 
     except Exception as e:
         print(f"Error: {e}")
