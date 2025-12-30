@@ -18,30 +18,42 @@ def set_black_window_below_league(root_hwnd, league_hwnd):
     )
 
 
+def make_window_tool_window(hwnd):
+    style = win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE)
+    style |= win32con.WS_EX_TOOLWINDOW
+    style &= ~win32con.WS_EX_APPWINDOW
+    win32gui.SetWindowLong(hwnd, win32con.GWL_EXSTYLE, style)
+
+
 def main():
     root = tk.Tk()
     root.attributes("-fullscreen", True)
     root.configure(bg="black")
-    root.withdraw()  # Start hidden
+    root.withdraw()
+    root.update()
+    make_window_tool_window(root.winfo_id())
 
     try:
         while True:
-            print("...")
-            # Native Windows window finding
-            hwnd = win32gui.FindWindow(None, "League of Legends (TM) Client")
-            foreground_hwnd = win32gui.GetForegroundWindow()
+            try:
+                print("...")
+                # Native Windows window finding
+                hwnd = win32gui.FindWindow(None, "League of Legends (TM) Client")
+                foreground_hwnd = win32gui.GetForegroundWindow()
 
-            if foreground_hwnd == hwnd and hwnd != 0:
-                toggle_taskbar(False)
-                root.deiconify()
-                root.update()
-                set_black_window_below_league(root.winfo_id(), hwnd)
-                win32gui.SetForegroundWindow(hwnd)
-            else:
-                toggle_taskbar(True)
-                root.withdraw()
+                if foreground_hwnd == hwnd and hwnd != 0:
+                    toggle_taskbar(False)
+                    root.deiconify()
+                    root.update()
+                    set_black_window_below_league(root.winfo_id(), hwnd)
+                    win32gui.SetForegroundWindow(hwnd)
+                else:
+                    toggle_taskbar(True)
+                    root.withdraw()
 
-            time.sleep(0.5)
+                time.sleep(0.5)
+            except Exception as e:
+                print(f"Error: {e}, continuing...")
     except KeyboardInterrupt:
         toggle_taskbar(True)
         root.destroy()
