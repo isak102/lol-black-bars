@@ -1,19 +1,30 @@
 """
-League of Legends Black Bars Script (Event-Driven Version)
+Black Bars Script (Event-Driven Version)
 
-Creates a black background behind the League of Legends game window when it's focused,
-and hides the Windows taskbar. Restores everything when League loses focus or is minimized.
+Creates a black background behind monitored game/application windows when focused,
+and hides the Windows taskbar. Restores everything when the window loses focus or is minimized.
 
 Uses Windows Event Hooks (SetWinEventHook) for efficient event-driven detection instead of polling.
+
+Configuration:
+    Set WINDOW_TITLES to a list of window titles to monitor, or pass them via --titles argument.
+    Example: python main.py --titles "Window Title 1" "Window Title 2"
+
+    Or create a black_bars_config.json file with the following format:
+    {
+        "window_titles": ["Window Title 1", "Window Title 2"]
+    }
 """
 
 from __future__ import annotations
 
 import ctypes
 import ctypes.wintypes
+import json
 import signal
 import sys
 import threading
+from pathlib import Path
 from typing import Any
 
 import pystray
@@ -23,7 +34,9 @@ import win32gui
 from PIL import Image, ImageDraw
 
 # Constants
-LEAGUE_WINDOW_TITLE = "League of Legends (TM) Client"
+# List of window titles to monitor. Can be overridden via command-line arguments or config file
+WINDOW_TITLES = ["League of Legends (TM) Client", "League of Legends"]
+CONFIG_FILE = Path("black_bars_config.json")
 TASKBAR_CLASS = "Shell_TrayWnd"
 START_BUTTON_CLASS = "Button"
 
@@ -40,6 +53,44 @@ black_bars_active: bool = False
 hook_handles: list[int] = []
 tray_icon: pystray.Icon | None = None
 shutting_down: bool = False
+
+
+# =============================================================================
+# Configuration
+# =============================================================================
+
+
+def load_config() -> None:
+    """Load configuration from file or command-line arguments."""
+    global WINDOW_TITLES
+
+    # Check for config file
+    if CONFIG_FILE.exists():
+        try:
+            with open(CONFIG_FILE) as f:
+                config = json.load(f)
+                if "window_titles" in config and isinstance(
+                    config["window_titles"], list
+                ):
+                    WINDOW_TITLES = config["window_titles"]
+                    print(f"Loaded {len(WINDOW_TITLES)} window titles from config file")
+        except Exception as e:
+            print(f"Warning: Failed to load config file: {e}")
+
+    # Check for command-line arguments (override config file)
+    if "--titles" in sys.argv:
+        idx = sys.argv.index("--titles")
+        titles = []
+        for arg in sys.argv[idx + 1 :]:
+            if arg.startswith("--"):
+                break
+            titles.append(arg)
+
+        if titles:
+            WINDOW_TITLES = titles
+            print(
+                f"Loaded {len(WINDOW_TITLES)} window titles from command-line arguments"
+            )
 
 
 # =============================================================================
@@ -68,9 +119,9 @@ def is_window_minimized(hwnd: int) -> bool:
         return False
 
 
-def is_league_game_window(hwnd: int) -> bool:
-    """Check if the given window handle is the League of Legends game window."""
-    return get_window_title(hwnd) == LEAGUE_WINDOW_TITLE
+def is_monitored_window(hwnd: int) -> bool:
+    """Check if the given window handle is one of the monitored windows."""
+    return get_window_title(hwnd) in WINDOW_TITLES
 
 
 # =============================================================================
@@ -107,7 +158,7 @@ def get_monitor_rect(hwnd: int) -> tuple[int, int, int, int] | None:
 
 def create_window_class() -> str:
     """Register a window class for the black background window."""
-    class_name = "LeagueBlackBarsWindow"
+    class_name = "BlackBarsWindow"
 
     wc = win32gui.WNDCLASS()
     wc.lpfnWndProc = {  # type: ignore[assignment]
@@ -181,13 +232,13 @@ def create_black_window(monitor_rect: tuple[int, int, int, int]) -> int:
     return hwnd
 
 
-def show_black_window(hwnd: int, league_hwnd: int) -> None:
-    """Show the black window and position it just below the League window in z-order."""
-    # Position the black window just below League in the z-order
-    # This ensures it's behind League but in front of everything else
+def show_black_window(hwnd: int, monitored_hwnd: int) -> None:
+    """Show the black window and position it just below the monitored window in z-order."""
+    # Position the black window just below the monitored window in the z-order
+    # This ensures it's behind the monitored window but in front of everything else
     win32gui.SetWindowPos(
         hwnd,
-        league_hwnd,  # Insert after (below) League window
+        monitored_hwnd,  # Insert after (below) monitored window
         0,
         0,
         0,
@@ -264,24 +315,28 @@ def show_taskbar() -> None:
 # =============================================================================
 
 
-def activate_black_bars(league_hwnd: int) -> None:
-    """Activate black bars mode for the given League window."""
+def activate_black_bars(monitored_hwnd: int) -> None:
+    """Activate black bars mode for the given monitored window."""
     global black_window_hwnd, black_bars_active
 
-    # Get the monitor where League is displayed
-    monitor_rect = get_monitor_rect(league_hwnd)
+    # Get the monitor where the window is displayed
+    monitor_rect = get_monitor_rect(monitored_hwnd)
     if not monitor_rect:
-        print("Warning: Could not determine monitor for League window")
+        window_title = get_window_title(monitored_hwnd)
+        print(f"Warning: Could not determine monitor for window: '{window_title}'")
         return
 
     # Create and show the black background window
     if black_window_hwnd is None:
         black_window_hwnd = create_black_window(monitor_rect)
 
-    show_black_window(black_window_hwnd, league_hwnd)
+    show_black_window(black_window_hwnd, monitored_hwnd)
     hide_taskbar()
     black_bars_active = True
-    print(f"Black bars activated on monitor: {monitor_rect}")
+    window_title = get_window_title(monitored_hwnd)
+    print(
+        f"Black bars activated for window: '{window_title}' on monitor: {monitor_rect}"
+    )
 
 
 def deactivate_black_bars() -> None:
@@ -296,22 +351,22 @@ def deactivate_black_bars() -> None:
     print("Black bars deactivated")
 
 
-def ensure_black_window_z_order(league_hwnd: int) -> None:
-    """Ensure the black window is positioned directly below the League window in z-order."""
+def ensure_black_window_z_order(monitored_hwnd: int) -> None:
+    """Ensure the black window is positioned directly below the monitored window in z-order."""
     global black_window_hwnd
 
     if black_window_hwnd is None:
         return
 
     try:
-        # Get the window directly below League in z-order
-        window_below_league = win32gui.GetWindow(league_hwnd, win32con.GW_HWNDNEXT)
+        # Get the window directly below the monitored window in z-order
+        window_below = win32gui.GetWindow(monitored_hwnd, win32con.GW_HWNDNEXT)
 
-        # If our black window is not directly below League, reposition it
-        if window_below_league != black_window_hwnd:
+        # If our black window is not directly below the monitored window, reposition it
+        if window_below != black_window_hwnd:
             win32gui.SetWindowPos(
                 black_window_hwnd,
-                league_hwnd,  # Insert after (below) League window
+                monitored_hwnd,  # Insert after (below) monitored window
                 0,
                 0,
                 0,
@@ -326,7 +381,7 @@ def check_and_update_state() -> None:
     """Check the current foreground window and update black bars state accordingly."""
     foreground_hwnd = get_foreground_window()
 
-    if is_league_game_window(foreground_hwnd) and not is_window_minimized(
+    if is_monitored_window(foreground_hwnd) and not is_window_minimized(
         foreground_hwnd
     ):
         if not black_bars_active:
@@ -487,9 +542,9 @@ def create_tray_menu() -> pystray.Menu:
 def setup_tray_icon() -> pystray.Icon:
     """Create and configure the system tray icon."""
     icon = pystray.Icon(
-        name="lol-black-bars",
+        name="black-bars",
         icon=create_tray_icon_image(),
-        title="LoL Black Bars",
+        title="Black Bars",
         menu=create_tray_menu(),
     )
     return icon
@@ -544,15 +599,20 @@ def signal_handler(signum: int, frame: Any) -> None:
 
 def main() -> None:
     """Main entry point."""
-    global hook_handles, tray_icon, shutting_down
+    global hook_handles, tray_icon, shutting_down, WINDOW_TITLES
+
+    # Load configuration
+    load_config()
 
     # Set up signal handlers for graceful shutdown
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
-    print("League of Legends Black Bars Script (Event-Driven)")
+    print("Black Bars Script (Event-Driven)")
     print("=" * 50)
-    print(f"Monitoring for window: '{LEAGUE_WINDOW_TITLE}'")
+    print(f"Monitoring {len(WINDOW_TITLES)} window(s):")
+    for title in WINDOW_TITLES:
+        print(f"  - '{title}'")
     print("Using Windows Event Hooks (no polling)")
     print("System tray icon active - right-click to access menu")
     print("Press Ctrl+C to exit")
@@ -575,7 +635,7 @@ def main() -> None:
         tray_thread.start()
         print("System tray icon started")
 
-        # Check initial state (in case League is already focused)
+        # Check initial state (in case a monitored window is already focused)
         check_and_update_state()
 
         # Run a non-blocking message loop using PeekMessage
