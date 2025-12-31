@@ -32,7 +32,9 @@ from typing import Any
 import pystray
 import win32api
 import win32con
+import win32event
 import win32gui
+import winerror
 from PIL import Image, ImageDraw
 
 # Constants
@@ -57,6 +59,7 @@ black_bars_active: bool = False
 hook_handles: list[int] = []
 tray_icon: pystray.Icon | None = None
 shutting_down: bool = False
+singleton_mutex: Any = None
 
 # =============================================================================
 # Logging
@@ -610,9 +613,17 @@ def run_tray_icon(icon: pystray.Icon) -> None:
 
 def cleanup() -> None:
     """Clean up resources and restore system state."""
-    global black_window_hwnd, hook_handles, tray_icon
+    global black_window_hwnd, hook_handles, tray_icon, singleton_mutex
 
     logger.info("Cleaning up...")
+
+    # Release the singleton mutex
+    if singleton_mutex:
+        try:
+            win32api.CloseHandle(singleton_mutex)
+        except Exception:
+            pass
+        singleton_mutex = None
 
     # Stop the tray icon
     if tray_icon:
@@ -647,7 +658,14 @@ def signal_handler(signum: int, frame: Any) -> None:
 
 def main() -> None:
     """Main entry point."""
-    global hook_handles, tray_icon, shutting_down, WINDOW_TITLES, logger
+    global hook_handles, tray_icon, shutting_down, WINDOW_TITLES, logger, singleton_mutex
+
+    # Ensure only one instance is running
+    mutex_name = "LoLBlackBars_SingleInstance_Mutex"
+    singleton_mutex = win32event.CreateMutex(None, False, mutex_name)
+    if win32api.GetLastError() == winerror.ERROR_ALREADY_EXISTS:
+        logger.warning("Another instance of Black Bars is already running. Exiting.")
+        sys.exit(0)
 
     # Load configuration
     load_config()
