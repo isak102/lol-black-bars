@@ -21,6 +21,8 @@ from __future__ import annotations
 import ctypes
 import ctypes.wintypes
 import json
+import logging
+import logging.handlers
 import signal
 import sys
 import threading
@@ -35,7 +37,9 @@ from PIL import Image, ImageDraw
 
 # Constants
 # List of window titles to monitor. Can be overridden via command-line arguments or config file
-WINDOW_TITLES = ["League of Legends (TM) Client", "League of Legends"]
+WINDOW_TITLES = [
+    "League of Legends (TM) Client",
+]
 CONFIG_FILE = Path("black_bars_config.json")
 TASKBAR_CLASS = "Shell_TrayWnd"
 START_BUTTON_CLASS = "Button"
@@ -54,6 +58,36 @@ hook_handles: list[int] = []
 tray_icon: pystray.Icon | None = None
 shutting_down: bool = False
 
+# =============================================================================
+# Logging
+# =============================================================================
+
+log = logging.getLogger("black_bars")
+log.setLevel(logging.DEBUG)
+
+# Create formatters
+formatter = logging.Formatter(
+    "%(asctime)s - %(levelname)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
+)
+
+# File handler (rotating log file)
+log_file = Path("black_bars.log")  # TODO: Change this path to somewhere else
+file_handler = logging.handlers.RotatingFileHandler(
+    log_file,
+    maxBytes=5 * 1024 * 1024,  # 5MB
+    backupCount=3,  # Keep 3 backup files
+)
+file_handler.setLevel(logging.INFO)
+file_handler.setFormatter(formatter)
+log.addHandler(file_handler)
+
+# Console handler (stdout) - DEBUG level for verbose console output
+console_handler = logging.StreamHandler(sys.stdout)
+console_handler.setLevel(logging.DEBUG)
+console_handler.setFormatter(formatter)
+log.addHandler(console_handler)
+
+logger = log
 
 # =============================================================================
 # Configuration
@@ -73,9 +107,11 @@ def load_config() -> None:
                     config["window_titles"], list
                 ):
                     WINDOW_TITLES = config["window_titles"]
-                    print(f"Loaded {len(WINDOW_TITLES)} window titles from config file")
+                    logger.info(
+                        f"Loaded {len(WINDOW_TITLES)} window titles from config file"
+                    )
         except Exception as e:
-            print(f"Warning: Failed to load config file: {e}")
+            logger.warning(f"Failed to load config file: {e}")
 
     # Check for command-line arguments (override config file)
     if "--titles" in sys.argv:
@@ -88,7 +124,7 @@ def load_config() -> None:
 
         if titles:
             WINDOW_TITLES = titles
-            print(
+            logger.info(
                 f"Loaded {len(WINDOW_TITLES)} window titles from command-line arguments"
             )
 
@@ -323,7 +359,7 @@ def activate_black_bars(monitored_hwnd: int) -> None:
     monitor_rect = get_monitor_rect(monitored_hwnd)
     if not monitor_rect:
         window_title = get_window_title(monitored_hwnd)
-        print(f"Warning: Could not determine monitor for window: '{window_title}'")
+        logger.warning(f"Could not determine monitor for window: '{window_title}'")
         return
 
     # Create and show the black background window
@@ -334,7 +370,7 @@ def activate_black_bars(monitored_hwnd: int) -> None:
     hide_taskbar()
     black_bars_active = True
     window_title = get_window_title(monitored_hwnd)
-    print(
+    logger.debug(
         f"Black bars activated for window: '{window_title}' on monitor: {monitor_rect}"
     )
 
@@ -348,7 +384,7 @@ def deactivate_black_bars() -> None:
 
     show_taskbar()
     black_bars_active = False
-    print("Black bars deactivated")
+    logger.debug("Black bars deactivated")
 
 
 def ensure_black_window_z_order(monitored_hwnd: int) -> None:
@@ -521,22 +557,34 @@ def on_tray_quit(icon: pystray.Icon, item: pystray.MenuItem) -> None:
     shutting_down = True
 
 
-def get_status_text() -> str:
-    """Get the current status text for the tray menu."""
-    return "Active" if black_bars_active else "Inactive"
-
-
 def create_tray_menu() -> pystray.Menu:
     """Create the system tray context menu."""
-    return pystray.Menu(
+    menu_items = [
         pystray.MenuItem(
-            lambda text: f"Status: {get_status_text()}",
+            "Listening for:",
             None,
             enabled=False,
         ),
-        pystray.Menu.SEPARATOR,
-        pystray.MenuItem("Exit", on_tray_quit),
+    ]
+
+    # Add each monitored window title as a non-clickable menu item
+    for title in WINDOW_TITLES:
+        menu_items.append(
+            pystray.MenuItem(
+                f"  • {title}",
+                None,
+                enabled=False,
+            )
+        )
+
+    menu_items.extend(
+        [
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem("Exit", on_tray_quit),
+        ]
     )
+
+    return pystray.Menu(*menu_items)
 
 
 def setup_tray_icon() -> pystray.Icon:
@@ -564,7 +612,7 @@ def cleanup() -> None:
     """Clean up resources and restore system state."""
     global black_window_hwnd, hook_handles, tray_icon
 
-    print("\nCleaning up...")
+    logger.info("Cleaning up...")
 
     # Stop the tray icon
     if tray_icon:
@@ -587,7 +635,7 @@ def cleanup() -> None:
         destroy_black_window(black_window_hwnd)
         black_window_hwnd = None
 
-    print("Cleanup complete")
+    logger.info("Cleanup complete")
 
 
 def signal_handler(signum: int, frame: Any) -> None:
@@ -599,7 +647,7 @@ def signal_handler(signum: int, frame: Any) -> None:
 
 def main() -> None:
     """Main entry point."""
-    global hook_handles, tray_icon, shutting_down, WINDOW_TITLES
+    global hook_handles, tray_icon, shutting_down, WINDOW_TITLES, logger
 
     # Load configuration
     load_config()
@@ -608,24 +656,24 @@ def main() -> None:
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
-    print("Black Bars Script (Event-Driven)")
-    print("=" * 50)
-    print(f"Monitoring {len(WINDOW_TITLES)} window(s):")
+    logger.info("Black Bars Script (Event-Driven)")
+    logger.info("=" * 50)
+    logger.info(f"Monitoring {len(WINDOW_TITLES)} window(s):")
     for title in WINDOW_TITLES:
-        print(f"  - '{title}'")
-    print("Using Windows Event Hooks (no polling)")
-    print("System tray icon active - right-click to access menu")
-    print("Press Ctrl+C to exit")
-    print("=" * 50)
+        logger.info(f"  - '{title}'")
+    logger.info("Using Windows Event Hooks (no polling)")
+    logger.info("System tray icon active - right-click to access menu")
+    logger.info("Press Ctrl+C to exit")
+    logger.info("=" * 50)
 
     try:
         # Install the Windows event hooks
         hook_handles = install_event_hooks()
         if not hook_handles:
-            print("Error: Failed to install Windows event hooks")
+            logger.error("Failed to install Windows event hooks")
             sys.exit(1)
 
-        print(f"Event hooks installed successfully ({len(hook_handles)} hooks)")
+        logger.info(f"Event hooks installed successfully ({len(hook_handles)} hooks)")
 
         # Set up and start the system tray icon in a separate thread
         tray_icon = setup_tray_icon()
@@ -633,7 +681,7 @@ def main() -> None:
             target=run_tray_icon, args=(tray_icon,), daemon=True
         )
         tray_thread.start()
-        print("System tray icon started")
+        logger.info("System tray icon started")
 
         # Check initial state (in case a monitored window is already focused)
         check_and_update_state()
@@ -661,9 +709,9 @@ def main() -> None:
                 time.sleep(0.01)
 
     except KeyboardInterrupt:
-        pass
+        logger.info("Keyboard interrupt received")
     except Exception as e:
-        print(f"Error: {e}")
+        logger.error(f"Error: {e}", exc_info=True)
     finally:
         cleanup()
 
